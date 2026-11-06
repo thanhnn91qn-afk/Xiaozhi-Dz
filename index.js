@@ -517,24 +517,45 @@ app.get("/proxy_audio", async (req, res) => {
     res.set({ "Content-Type": "audio/mpeg", "Accept-Ranges": "bytes", "Cache-Control": "no-store" });
     srcRes.body.pipe(ff.stdin);
     ff.stdin.on("error", () => {});
+    // Pace the output slightly faster than real time (about 7 KB/s for a 6 KB/s stream) so the TLS records stay a few
+    // hundred bytes long. A small device cannot allocate the 16 KB buffer that coalesced records would need.
+    const queue = [];
+    let queued = 0;
+    let ended = false;
+    let ticks = 0;
+    const timer = setInterval(() => {
+      if (res.writableEnded || res.destroyed) { clearInterval(timer); return; }
+      ticks++;
+      let allowance = ticks <= 10 ? 1400 : 350; // quick start, then steady pace
+      while (allowance > 0 && queue.length > 0) {
+        const c = queue[0];
+        const n = Math.min(c.length, allowance);
+        res.write(c.subarray(0, n));
+        allowance -= n;
+        queued -= n;
+        if (n === c.length) queue.shift(); else queue[0] = c.subarray(n);
+      }
+      if (queued < 65536) ff.stdout.resume();
+      if (ended && queue.length === 0) { clearInterval(timer); res.end(); }
+    }, 50);
     ff.stdout.on("data", (chunk) => {
       if (skip > 0) {
         if (chunk.length <= skip) { skip -= chunk.length; return; }
         chunk = chunk.subarray(skip);
         skip = 0;
       }
-      if (!res.write(chunk)) {
-        ff.stdout.pause();
-        res.once("drain", () => ff.stdout.resume());
-      }
+      queue.push(chunk);
+      queued += chunk.length;
+      if (queued >= 65536) ff.stdout.pause();
     });
-    ff.stdout.on("end", () => res.end());
+    ff.stdout.on("end", () => { ended = true; });
     ff.stderr.on("data", (d) => console.error("[ffmpeg]", d.toString().trim()));
     ff.on("error", (err) => {
       console.error("[proxy_audio] ffmpeg error:", err.message);
       if (!res.headersSent) res.status(500).send(err.message); else res.end();
     });
     res.on("close", () => {
+      clearInterval(timer);
       try { ff.kill("SIGKILL"); } catch (e) {}
       try { srcRes.body.destroy(); } catch (e) {}
     });
