@@ -510,8 +510,25 @@ app.get("/proxy_audio", async (req, res) => {
     // Low-bandwidth stream for small devices: mono, 16 kHz, 48 kbps MP3 without ID3 tag or cover art.
     // A Range request resumes by skipping the first N bytes of the (deterministic) transcoded output.
     const m = /bytes=(\d+)-/.exec(req.headers.range || "");
-    let skip = m ? parseInt(m[1], 10) : 0;
-    const srcRes = await fetch(streamUrl, { headers: { "User-Agent": UA, Range: "bytes=0-" } });
+    const outOffset = m ? parseInt(m[1], 10) : 0;
+    let skip = 0;
+    let srcRange = "bytes=0-";
+    if (outOffset > 0) {
+      // Resume after a dropped connection: the output is a constant 6000 B/s, so jump straight to the matching
+      // time in the 128 kbps source (after its ID3 tag) instead of transcoding and discarding everything before it.
+      try {
+        const head = await fetch(streamUrl, { headers: { "User-Agent": UA, Range: "bytes=0-9" } });
+        const hb = await head.buffer();
+        let id3 = 0;
+        if (hb.length >= 10 && hb.toString("latin1", 0, 3) === "ID3") {
+          id3 = (((hb[6] & 0x7f) << 21) | ((hb[7] & 0x7f) << 14) | ((hb[8] & 0x7f) << 7) | (hb[9] & 0x7f)) + 10;
+        }
+        srcRange = "bytes=" + (id3 + Math.floor((outOffset / 6000) * 16000)) + "-";
+      } catch (e) {
+        skip = outOffset;
+      }
+    }
+    const srcRes = await fetch(streamUrl, { headers: { "User-Agent": UA, Range: srcRange } });
     const ff = spawn(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn", "-map_metadata", "-1",
       "-ac", "1", "-ar", "16000", "-b:a", "48k", "-id3v2_version", "0", "-write_xing", "0", "-f", "mp3", "pipe:1"]);
     res.set({ "Content-Type": "audio/mpeg", "Accept-Ranges": "bytes", "Cache-Control": "no-store" });
