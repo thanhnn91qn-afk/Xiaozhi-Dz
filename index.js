@@ -12,6 +12,9 @@ const fs = require("fs");
 const WebSocket = require("ws");
 const zing = require("./zingmp3");
 const extraTools = require("./tools");
+const { spawn } = require("child_process");
+let ffmpegPath = null;
+try { ffmpegPath = require("ffmpeg-static"); } catch (e) { console.warn("[ffmpeg] ffmpeg-static not available, serving original audio:", e.message); }
 
 const app = express();
 app.use(cors());
@@ -489,25 +492,55 @@ app.get("/proxy_audio", async (req, res) => {
       return res.status(404).send("Stream URL not found");
     }
 
-    console.log(`[proxy_audio] 📡 Stream MP3 id=${id}`);
-    const audioRes = await fetch(streamUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Range: req.headers.range || "bytes=0-",
-      },
-    });
+    console.log("[proxy_audio] stream MP3 id=" + id);
+    const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-    res.set({
-      "Content-Type": audioRes.headers.get("content-type") || "audio/mpeg",
-      "Content-Length": audioRes.headers.get("content-length") || "",
-      "Accept-Ranges": "bytes",
-    });
+    // Raw passthrough (original behaviour) when ffmpeg is not available or ?raw=1 is given.
+    if (!ffmpegPath || req.query.raw === "1") {
+      const rawRes = await fetch(streamUrl, { headers: { "User-Agent": UA, Range: req.headers.range || "bytes=0-" } });
+      res.set({
+        "Content-Type": rawRes.headers.get("content-type") || "audio/mpeg",
+        "Content-Length": rawRes.headers.get("content-length") || "",
+        "Accept-Ranges": "bytes",
+      });
+      rawRes.body.pipe(res);
+      return;
+    }
 
-    audioRes.body.pipe(res);
+    // Low-bandwidth stream for small devices: mono, 16 kHz, 48 kbps MP3 without ID3 tag or cover art.
+    // A Range request resumes by skipping the first N bytes of the (deterministic) transcoded output.
+    const m = /bytes=(\d+)-/.exec(req.headers.range || "");
+    let skip = m ? parseInt(m[1], 10) : 0;
+    const srcRes = await fetch(streamUrl, { headers: { "User-Agent": UA, Range: "bytes=0-" } });
+    const ff = spawn(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn", "-map_metadata", "-1",
+      "-ac", "1", "-ar", "16000", "-b:a", "48k", "-id3v2_version", "0", "-write_xing", "0", "-f", "mp3", "pipe:1"]);
+    res.set({ "Content-Type": "audio/mpeg", "Accept-Ranges": "bytes", "Cache-Control": "no-store" });
+    srcRes.body.pipe(ff.stdin);
+    ff.stdin.on("error", () => {});
+    ff.stdout.on("data", (chunk) => {
+      if (skip > 0) {
+        if (chunk.length <= skip) { skip -= chunk.length; return; }
+        chunk = chunk.subarray(skip);
+        skip = 0;
+      }
+      if (!res.write(chunk)) {
+        ff.stdout.pause();
+        res.once("drain", () => ff.stdout.resume());
+      }
+    });
+    ff.stdout.on("end", () => res.end());
+    ff.stderr.on("data", (d) => console.error("[ffmpeg]", d.toString().trim()));
+    ff.on("error", (err) => {
+      console.error("[proxy_audio] ffmpeg error:", err.message);
+      if (!res.headersSent) res.status(500).send(err.message); else res.end();
+    });
+    res.on("close", () => {
+      try { ff.kill("SIGKILL"); } catch (e) {}
+      try { srcRes.body.destroy(); } catch (e) {}
+    });
   } catch (err) {
-    console.error(`[proxy_audio] ❌ Lỗi:`, err.message);
-    res.status(500).send(err.message);
+    console.error("[proxy_audio] error:", err.message);
+    if (!res.headersSent) res.status(500).send(err.message);
   }
 });
 
