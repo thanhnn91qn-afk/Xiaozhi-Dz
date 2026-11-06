@@ -68,14 +68,7 @@ function loadSavedDevices() {
   } catch (e) {
     console.error(`[storage] ❌ Lỗi đọc devices.json: ${e.message}`);
   }
-  return [
-    {
-      deviceName: "NAM01",
-      wssUrl: "wss://api.xiaozhi.me/mcp/?token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEwMzA0NDIsImFnZW50SWQiOjI1Nzk2OTgsImVuZHBvaW50SWQiOiJhZ2VudF8yNTc5Njk4IiwicHVycG9zZSI6Im1jcC1lbmRwb2ludCIsImlhdCI6MTc5MzU2MzY1NiwiZXhwIjoxODI1MTIxMjU2fQ.WtcTayrm3vvlM0C9KxOc_nU1fgh6tI-1kW7p5wdTEhlcz3X2mtdQ93EE4Flfrss7lJ49lNKUVR7krcPSdWQh1Q",
-      savedAt: new Date().toISOString(),
-      autoConnect: true,
-    },
-  ];
+  return [];
 }
 
 function saveDevicesToFile(devices) {
